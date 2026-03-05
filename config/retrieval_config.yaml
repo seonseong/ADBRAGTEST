@@ -1,0 +1,10 @@
+# 벡터 검색 파라미터
+
+# 검색 결과 상위 k개 반환
+top_k: 5
+
+# 유사도 하한값 (0.0~1.0). 이 값 미만의 결과는 제외
+similarity_threshold: 0.7
+
+# Re-ranking 활성화 여부 (Task 008에서 구현 후 true로 전환 가능)
+enable_reranker: false

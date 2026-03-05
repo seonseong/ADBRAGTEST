@@ -1,0 +1,11 @@
+# LLM 생성 모델 파라미터
+# 엔드포인트 URL은 .env의 DATABRICKS_LLM_ENDPOINT 참조
+
+# 응답 다양성 조절 (0.0~2.0). SOP 문서는 정확성이 우선이므로 낮게 설정
+temperature: 0.1
+
+# 최대 응답 토큰 수
+max_tokens: 2048
+
+# 로깅/MLflow 추적용 레이블 (실제 엔드포인트 선택은 .env에서)
+model_label: "claude-sonnet-4-5"
