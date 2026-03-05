@@ -31,7 +31,7 @@ import os
 # Workspace에서 실행할 경우 프로젝트 루트를 sys.path에 추가
 # 로컬 개발 시 Databricks Repos를 사용하면 /Workspace/Repos/<user>/<repo-name> 경로 사용
 # 아래 경로를 실제 Databricks Workspace 경로로 수정하세요
-PROJECT_ROOT = "/Workspace/Repos/<your-user>/<repo-name>"  # ← 실제 경로로 변경
+PROJECT_ROOT = "/Workspace/Repos/shseo@in4ucloud.com/ADBRAGTEST"
 
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
