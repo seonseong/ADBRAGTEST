@@ -16,9 +16,10 @@
 
 # COMMAND ----------
 
-# EasyOCR 설치 (한국어 OCR용)
-# 첫 실행 시 ~300MB 모델 다운로드 소요
-%pip install easyocr
+# 의존성 설치
+# - pydantic v2: Databricks 기본 환경이 v1이므로 명시적 업그레이드 필요
+# - easyocr: 한국어 OCR용 (첫 실행 시 ~300MB 모델 다운로드 소요)
+%pip install "pydantic>=2.10.0,<3" easyocr
 
 # COMMAND ----------
 # MAGIC %md ## 셀 2: 프로젝트 패키지 경로 설정
