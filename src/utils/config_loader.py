@@ -1,76 +1,97 @@
 """YAML 설정 파일 로더.
 
-config/ 디렉토리의 YAML 파일을 읽어 Pydantic v2 모델로 검증 후 반환한다.
-잘못된 값은 ValidationError로 누락 키/타입 불일치를 명확히 출력한다.
+config/ 디렉토리의 YAML 파일을 읽어 dataclass로 검증 후 반환한다.
+Databricks 환경의 pydantic 버전 충돌을 피하기 위해 dataclass + 수동 검증을 사용한다.
 """
 
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated
 
 import yaml
-from pydantic import BaseModel, Field, field_validator, model_validator
 
 _CONFIG_DIR = Path("config")
 
 
 # ─────────────────────────────────────────
-# Pydantic 모델 정의
+# Config 데이터 클래스 정의
 # ─────────────────────────────────────────
 
 
-class LLMConfig(BaseModel):
+@dataclass
+class LLMConfig:
     """LLM 생성 모델 파라미터 (config/llm_config.yaml)."""
 
-    temperature: Annotated[float, Field(ge=0.0, le=2.0)]
-    max_tokens: Annotated[int, Field(ge=1)]
+    temperature: float
+    max_tokens: int
     model_label: str
 
 
-class ChunkingConfig(BaseModel):
+@dataclass
+class ChunkingConfig:
     """청킹 파라미터 (config/chunking_config.yaml)."""
 
-    chunk_size: Annotated[int, Field(ge=100)]
-    chunk_overlap: Annotated[int, Field(ge=0)]
+    chunk_size: int
+    chunk_overlap: int
     strategy: str
 
-    @model_validator(mode="after")
-    def overlap_must_be_less_than_size(self) -> "ChunkingConfig":
-        if self.chunk_overlap >= self.chunk_size:
-            msg = f"chunk_overlap({self.chunk_overlap})은 chunk_size({self.chunk_size})보다 작아야 합니다"
-            raise ValueError(msg)
-        return self
 
-    @field_validator("strategy")
-    @classmethod
-    def strategy_must_be_valid(cls, v: str) -> str:
-        allowed = {"recursive", "sentence", "token"}
-        if v not in allowed:
-            msg = f"strategy는 {allowed} 중 하나여야 합니다. 입력값: '{v}'"
-            raise ValueError(msg)
-        return v
-
-
-class RetrievalConfig(BaseModel):
+@dataclass
+class RetrievalConfig:
     """벡터 검색 파라미터 (config/retrieval_config.yaml)."""
 
-    top_k: Annotated[int, Field(ge=1, le=20)]
-    similarity_threshold: Annotated[float, Field(ge=0.0, le=1.0)]
+    top_k: int
+    similarity_threshold: float
     enable_reranker: bool
 
 
-class PromptTemplates(BaseModel):
+@dataclass
+class PromptTemplates:
     """프롬프트 템플릿 (config/prompt_templates.yaml)."""
 
     system_prompt: str
     user_prompt_template: str
 
-    @field_validator("user_prompt_template")
-    @classmethod
-    def template_must_have_placeholders(cls, v: str) -> str:
-        if "{context}" not in v or "{question}" not in v:
-            msg = "user_prompt_template에는 {context}와 {question} 플레이스홀더가 필요합니다"
-            raise ValueError(msg)
-        return v
+
+# ─────────────────────────────────────────
+# 검증 함수
+# ─────────────────────────────────────────
+
+
+def _validate_llm_config(cfg: LLMConfig) -> None:
+    if not (0.0 <= cfg.temperature <= 2.0):
+        raise ValueError(f"temperature는 0.0~2.0 범위여야 합니다. 입력값: {cfg.temperature}")
+    if cfg.max_tokens < 1:
+        raise ValueError(f"max_tokens는 1 이상이어야 합니다. 입력값: {cfg.max_tokens}")
+
+
+def _validate_chunking_config(cfg: ChunkingConfig) -> None:
+    if cfg.chunk_size < 100:
+        raise ValueError(f"chunk_size는 100 이상이어야 합니다. 입력값: {cfg.chunk_size}")
+    if cfg.chunk_overlap < 0:
+        raise ValueError(f"chunk_overlap은 0 이상이어야 합니다. 입력값: {cfg.chunk_overlap}")
+    if cfg.chunk_overlap >= cfg.chunk_size:
+        raise ValueError(
+            f"chunk_overlap({cfg.chunk_overlap})은 chunk_size({cfg.chunk_size})보다 작아야 합니다"
+        )
+    allowed = {"recursive", "sentence", "token"}
+    if cfg.strategy not in allowed:
+        raise ValueError(f"strategy는 {allowed} 중 하나여야 합니다. 입력값: '{cfg.strategy}'")
+
+
+def _validate_retrieval_config(cfg: RetrievalConfig) -> None:
+    if not (1 <= cfg.top_k <= 20):
+        raise ValueError(f"top_k는 1~20 범위여야 합니다. 입력값: {cfg.top_k}")
+    if not (0.0 <= cfg.similarity_threshold <= 1.0):
+        raise ValueError(
+            f"similarity_threshold는 0.0~1.0 범위여야 합니다. 입력값: {cfg.similarity_threshold}"
+        )
+
+
+def _validate_prompt_templates(cfg: PromptTemplates) -> None:
+    if "{context}" not in cfg.user_prompt_template or "{question}" not in cfg.user_prompt_template:
+        raise ValueError(
+            "user_prompt_template에는 {context}와 {question} 플레이스홀더가 필요합니다"
+        )
 
 
 # ─────────────────────────────────────────
@@ -90,19 +111,31 @@ def _load_yaml(file_name: str) -> dict:  # type: ignore[type-arg]
 
 def load_llm_config() -> LLMConfig:
     """config/llm_config.yaml을 읽어 LLMConfig로 반환한다."""
-    return LLMConfig(**_load_yaml("llm_config.yaml"))
+    data = _load_yaml("llm_config.yaml")
+    cfg = LLMConfig(**data)
+    _validate_llm_config(cfg)
+    return cfg
 
 
 def load_chunking_config() -> ChunkingConfig:
     """config/chunking_config.yaml을 읽어 ChunkingConfig로 반환한다."""
-    return ChunkingConfig(**_load_yaml("chunking_config.yaml"))
+    data = _load_yaml("chunking_config.yaml")
+    cfg = ChunkingConfig(**data)
+    _validate_chunking_config(cfg)
+    return cfg
 
 
 def load_retrieval_config() -> RetrievalConfig:
     """config/retrieval_config.yaml을 읽어 RetrievalConfig로 반환한다."""
-    return RetrievalConfig(**_load_yaml("retrieval_config.yaml"))
+    data = _load_yaml("retrieval_config.yaml")
+    cfg = RetrievalConfig(**data)
+    _validate_retrieval_config(cfg)
+    return cfg
 
 
 def load_prompt_templates() -> PromptTemplates:
     """config/prompt_templates.yaml을 읽어 PromptTemplates로 반환한다."""
-    return PromptTemplates(**_load_yaml("prompt_templates.yaml"))
+    data = _load_yaml("prompt_templates.yaml")
+    cfg = PromptTemplates(**data)
+    _validate_prompt_templates(cfg)
+    return cfg
