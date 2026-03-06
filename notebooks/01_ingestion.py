@@ -8,8 +8,7 @@
 # MAGIC
 # MAGIC **실행 전 체크리스트:**
 # MAGIC - [ ] Databricks Volume에 PDF 14건 업로드 완료 (로컬에서 `uv run python -m src.ingestion.uploader` 실행)
-# MAGIC - [ ] 클러스터 라이브러리에 pymupdf, langchain-text-splitters, pydantic 설치 확인
-# MAGIC - [ ] 아래 셀에서 easyocr 설치 완료
+# MAGIC - [ ] 셀 1의 `%pip install`로 의존성 설치 (pymupdf, langchain-text-splitters, easyocr)
 
 # COMMAND ----------
 # MAGIC %md ## 셀 1: 의존성 설치

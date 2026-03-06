@@ -8,7 +8,8 @@ import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-_LOG_DIR = Path("logs")
+# Databricks Repos는 쓰기가 제한될 수 있으므로 /tmp 경로를 우선 사용
+_LOG_DIR = Path("/tmp/adb-rag-logs") if Path("/tmp").exists() else Path("logs")
 _LOG_FILE = _LOG_DIR / "app.log"
 _LOG_FORMAT = "[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s"
 _DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
