@@ -8,17 +8,17 @@
 # MAGIC
 # MAGIC **실행 전 체크리스트:**
 # MAGIC - [ ] Databricks Volume에 PDF 14건 업로드 완료 (로컬에서 `uv run python -m src.ingestion.uploader` 실행)
-# MAGIC - [ ] 셀 1의 `%pip install`로 의존성 설치 (pymupdf, langchain-text-splitters, easyocr)
+# MAGIC - [ ] 셀 1 실행 후 커널 재시작 확인, 셀 2부터 순서대로 실행
 
 # COMMAND ----------
 # MAGIC %md ## 셀 1: 의존성 설치
 
 # COMMAND ----------
 
-# 노트북 세션 의존성 설치
-# langchain-text-splitters는 pydantic v2 필요 → Databricks 환경 충돌로 제거
-# chunker.py에 동일 알고리즘 직접 구현됨
-%pip install pymupdf easyocr
+# PyMuPDF 설치 (PDF 텍스트 추출)
+# EasyOCR 제외: Databricks 클러스터에서 cv2 SIGABRT 크래시 발생
+# → 스캔 PDF 페이지는 PyMuPDF 결과를 그대로 사용 (텍스트 없으면 빈 청크로 건너뜀)
+%pip install pymupdf
 
 # COMMAND ----------
 # MAGIC %md ## 셀 2: 프로젝트 패키지 경로 설정
@@ -27,16 +27,21 @@
 
 import sys
 import os
+from pathlib import Path
 
-# Workspace에서 실행할 경우 프로젝트 루트를 sys.path에 추가
-# 로컬 개발 시 Databricks Repos를 사용하면 /Workspace/Repos/<user>/<repo-name> 경로 사용
-# 아래 경로를 실제 Databricks Workspace 경로로 수정하세요
-PROJECT_ROOT = "/Workspace/Repos/shseo@in4ucloud.com/ADBRAGTEST"
+# 현재 노트북 경로로 프로젝트 루트 자동 감지 (Repos/Users 경로 모두 지원)
+try:
+    _nb_path = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()
+    # 예: /Repos/email/ADBRAGTEST/notebooks/01_ingestion
+    #  → /Workspace/Repos/email/ADBRAGTEST
+    PROJECT_ROOT = "/Workspace" + "/".join(_nb_path.split("/")[:-2])
+except Exception:
+    # dbutils 미사용 환경 폴백
+    PROJECT_ROOT = "/Workspace/Repos/shseo@in4ucloud.com/ADBRAGTEST"
 
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-# config/ 디렉토리 기준 경로 설정 (config_loader가 상대경로 사용)
 os.chdir(PROJECT_ROOT)
 
 print(f"프로젝트 루트: {PROJECT_ROOT}")
@@ -52,14 +57,12 @@ from src.utils.config_loader import load_chunking_config
 
 logger = get_logger("01_ingestion")
 
-# 청킹 설정 확인
 cfg = load_chunking_config()
 logger.info("청킹 설정: chunk_size=%d, chunk_overlap=%d, strategy=%s",
             cfg.chunk_size, cfg.chunk_overlap, cfg.strategy)
 
-# Volume 경로 및 Table 이름 설정
-VOLUME_PATH = "/Volumes/shtest/ragtest/shrag"      # .env의 DATABRICKS_VOLUME_PATH
-CHUNKS_TABLE = "shtest.ragtest.chunks"             # .env의 DATABRICKS_CHUNKS_TABLE
+VOLUME_PATH = "/Volumes/shtest/ragtest/shrag"
+CHUNKS_TABLE = "shtest.ragtest.chunks"
 
 print(f"Volume 경로: {VOLUME_PATH}")
 print(f"Delta Table: {CHUNKS_TABLE}")
@@ -79,24 +82,24 @@ for f in sorted(pdf_files):
     print(f"  {f} ({size_kb} KB)")
 
 # COMMAND ----------
-# MAGIC %md ## 셀 5: PDF 파싱 (PyMuPDF + EasyOCR 폴백)
+# MAGIC %md ## 셀 5: PDF 파싱 (PyMuPDF)
 
 # COMMAND ----------
 
 from src.ingestion.parser import PDFParser, parse_all
 
-parser = PDFParser(ocr_languages=["ko", "en"], min_text_chars=50)
+# min_text_chars=0: 모든 페이지를 PyMuPDF로만 처리 (EasyOCR 비활성화)
+# EasyOCR은 Databricks 클러스터에서 cv2 SIGABRT 크래시 발생으로 사용 불가
+parser = PDFParser(min_text_chars=0)
 
 logger.info("PDF 파싱 시작...")
 parsed_docs = parse_all(VOLUME_PATH, parser=parser)
 
-# 파싱 결과 요약
 print(f"\n{'='*60}")
 print(f"파싱 완료: {len(parsed_docs)}/{len(pdf_files)}개 문서")
 print(f"{'='*60}")
 for doc in sorted(parsed_docs, key=lambda d: d.doc_name):
-    ocr_info = f" (OCR: {doc.ocr_page_count}페이지)" if doc.ocr_page_count > 0 else ""
-    print(f"  [{doc.doc_type}] {doc.doc_name[:50]:<50} {doc.total_text_length:>8,}자{ocr_info}")
+    print(f"  [{doc.doc_type}] {doc.doc_name[:50]:<50} {doc.total_text_length:>8,}자")
 
 # COMMAND ----------
 # MAGIC %md ## 셀 6: 청킹 수행
@@ -124,27 +127,14 @@ print(f"\nDelta Table 저장 완료: {saved_count:,}개 청크")
 
 # COMMAND ----------
 
-# 전체 청크 수 확인
 df = spark.table(CHUNKS_TABLE)
 print(f"총 청크 수: {df.count():,}")
 print()
 
-# 문서별 청크 분포
 print("문서별 청크 수:")
 df.groupBy("doc_name", "doc_type", "parse_method").count() \
   .orderBy("doc_name") \
   .show(50, truncate=False)
-
-# COMMAND ----------
-
-# OCR 적용 문서 확인
-ocr_df = df.filter(df.parse_method == "easyocr")
-ocr_count = ocr_df.count()
-print(f"EasyOCR 적용 청크: {ocr_count}개")
-
-if ocr_count > 0:
-    print("\nOCR 청크 샘플:")
-    ocr_df.select("doc_name", "page_number", "text").show(3, truncate=100)
 
 # COMMAND ----------
 
