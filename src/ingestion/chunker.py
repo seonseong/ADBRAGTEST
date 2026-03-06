@@ -4,13 +4,15 @@
 메타데이터를 첨부하여 Delta Table에 Upsert한다.
 
 Databricks 노트북(PySpark 환경)에서 import하여 사용한다.
+
+Note:
+    langchain_text_splitters는 pydantic v2를 요구하지만 Databricks 기본 환경이
+    pydantic v1 바이너리이므로, 동일 알고리즘을 직접 구현하여 의존성을 제거했다.
 """
 
 import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
-
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from src.ingestion.parser import ParsedDocument
 from src.utils.config_loader import load_chunking_config
@@ -41,6 +43,9 @@ WHEN MATCHED THEN UPDATE SET *
 WHEN NOT MATCHED THEN INSERT *
 """
 
+# RecursiveCharacterTextSplitter 기본 분리자 (langchain 기본값과 동일)
+_DEFAULT_SEPARATORS = ["\n\n", "\n", ". ", " ", ""]
+
 
 @dataclass
 class Chunk:
@@ -62,20 +67,98 @@ def _make_chunk_id(doc_name: str, page_number: int, chunk_index: int) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
+class _RecursiveTextSplitter:
+    """RecursiveCharacterTextSplitter 직접 구현.
+
+    langchain 의존성 없이 동일한 재귀 분리 알고리즘을 구현한다.
+    separators 순서대로 시도하며, 조각이 chunk_size를 초과하면
+    다음 separator로 재귀 분리한다.
+    """
+
+    def __init__(
+        self,
+        chunk_size: int,
+        chunk_overlap: int,
+        separators: list,
+    ) -> None:
+        self._chunk_size = chunk_size
+        self._chunk_overlap = chunk_overlap
+        self._separators = separators
+
+    def split_text(self, text: str) -> list:
+        """텍스트를 재귀적으로 분리하여 청크 리스트를 반환한다."""
+        return self._split(text, self._separators)
+
+    def _split(self, text: str, separators: list) -> list:
+        """현재 separator로 분리 후, 큰 조각은 다음 separator로 재귀 처리."""
+        if not text.strip():
+            return []
+
+        sep = separators[0]
+        remaining = separators[1:]
+
+        # 현재 separator로 분리
+        raw_parts = text.split(sep) if sep else list(text)
+        parts = [p for p in raw_parts if p.strip()]
+
+        # chunk_size 초과 조각은 다음 separator로 재귀 분리
+        good_parts = []
+        for part in parts:
+            if len(part) <= self._chunk_size or not remaining:
+                good_parts.append(part)
+            else:
+                good_parts.extend(self._split(part, remaining))
+
+        # 조각들을 chunk_size 기준으로 병합
+        return self._merge(good_parts, sep if sep else "")
+
+    def _merge(self, parts: list, separator: str) -> list:
+        """조각들을 chunk_size/chunk_overlap 기준으로 병합한다."""
+        chunks = []
+        current: list = []
+        current_len = 0
+
+        for part in parts:
+            part_len = len(part)
+            sep_len = len(separator) if current else 0
+            join_len = current_len + sep_len + part_len
+
+            if join_len > self._chunk_size and current:
+                chunk_text = separator.join(current).strip()
+                if chunk_text:
+                    chunks.append(chunk_text)
+
+                # overlap: 뒤에서부터 chunk_overlap 크기만큼 유지
+                while current:
+                    dropped = current.pop(0)
+                    current_len -= len(dropped) + len(separator)
+                    if current_len <= self._chunk_overlap:
+                        break
+
+            current.append(part)
+            current_len = sum(len(p) for p in current) + len(separator) * max(0, len(current) - 1)
+
+        if current:
+            chunk_text = separator.join(current).strip()
+            if chunk_text:
+                chunks.append(chunk_text)
+
+        return chunks
+
+
 class DocumentChunker:
     """문서 청커.
 
-    chunking_config.yaml의 파라미터로 RecursiveCharacterTextSplitter를 초기화하고,
+    chunking_config.yaml의 파라미터로 텍스트 분리기를 초기화하고,
     파싱된 문서를 청킹한 뒤 Delta Table에 Upsert한다.
     """
 
     def __init__(self) -> None:
         cfg = load_chunking_config()
-        self._splitter = RecursiveCharacterTextSplitter(
+        self._splitter = _RecursiveTextSplitter(
             chunk_size=cfg.chunk_size,
             chunk_overlap=cfg.chunk_overlap,
-            separators=["\n\n", "\n", ". ", " ", ""],
-            length_function=len,
+            separators=_DEFAULT_SEPARATORS,
         )
         logger.debug(
             "청커 초기화 완료: chunk_size=%d, chunk_overlap=%d",
@@ -83,12 +166,12 @@ class DocumentChunker:
             cfg.chunk_overlap,
         )
 
-    def chunk_document(self, doc: ParsedDocument) -> list[Chunk]:
+    def chunk_document(self, doc: ParsedDocument) -> list:
         """ParsedDocument를 청킹하여 Chunk 리스트를 반환한다.
 
         페이지 텍스트가 비어 있으면 해당 페이지는 건너뜀.
         """
-        chunks: list[Chunk] = []
+        chunks = []
         created_at = datetime.now(tz=timezone.utc)
 
         for page in doc.pages:
@@ -126,9 +209,9 @@ class DocumentChunker:
         )
         return chunks
 
-    def chunk_all(self, docs: list[ParsedDocument]) -> list[Chunk]:
+    def chunk_all(self, docs: list) -> list:
         """여러 문서를 청킹하고 통계를 로깅한다."""
-        all_chunks: list[Chunk] = []
+        all_chunks = []
         for doc in docs:
             chunks = self.chunk_document(doc)
             all_chunks.extend(chunks)
@@ -143,7 +226,7 @@ class DocumentChunker:
 
         return all_chunks
 
-    def save_to_delta(self, spark: object, chunks: list[Chunk], table_name: str) -> int:  # type: ignore[type-arg]
+    def save_to_delta(self, spark: object, chunks: list, table_name: str) -> int:
         """Chunk 리스트를 Delta Table에 Upsert한다.
 
         Args:
