@@ -10,9 +10,10 @@ dependencies = [
     "mlflow>=2.19.0,<3",
     # PDF 처리
     "pymupdf>=1.25.0,<1.26",
-    "langchain-text-splitters>=0.3.0,<0.4",
+    # langchain-text-splitters 제거: pydantic v2 의존 → Databricks 환경 충돌
+    # RecursiveCharacterTextSplitter 동일 알고리즘을 chunker.py에 직접 구현
     # 설정 및 유틸
-    "pydantic>=2.10.0,<3",
+    # pydantic 제거: config_loader가 dataclass 기반으로 교체됨
     "pyyaml>=6.0.0,<7",
     "python-dotenv>=1.0.0,<2",
     # HTTP 클라이언트 (임베딩/LLM 직접 호출)

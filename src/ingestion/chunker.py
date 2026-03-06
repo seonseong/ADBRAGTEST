@@ -1,13 +1,15 @@
 """청킹 및 Delta Table 저장 모듈.
 
-파싱된 문서를 RecursiveCharacterTextSplitter로 청킹하고
+파싱된 문서를 재귀 텍스트 분리 알고리즘으로 청킹하고
 메타데이터를 첨부하여 Delta Table에 Upsert한다.
 
 Databricks 노트북(PySpark 환경)에서 import하여 사용한다.
 
 Note:
-    langchain_text_splitters는 pydantic v2를 요구하지만 Databricks 기본 환경이
-    pydantic v1 바이너리이므로, 동일 알고리즘을 직접 구현하여 의존성을 제거했다.
+    Databricks 환경 제약으로 외부 라이브러리 의존성을 최소화했다.
+    - langchain_text_splitters: pydantic v2 요구 → Databricks pydantic v1 바이너리와 충돌
+      → RecursiveCharacterTextSplitter 동일 알고리즘을 직접 구현
+    - datetime.UTC: Python 3.11+ → timezone.utc로 대체 (Python 3.10 호환)
 """
 
 import hashlib
@@ -20,7 +22,7 @@ from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Delta Table DDL (Change Data Feed 활성화 포함)
+# Delta Table DDL (Change Data Feed 활성화 포함 — Vector Search 연동 필수)
 _CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS {table_name} (
     chunk_id     STRING NOT NULL,
@@ -43,7 +45,7 @@ WHEN MATCHED THEN UPDATE SET *
 WHEN NOT MATCHED THEN INSERT *
 """
 
-# RecursiveCharacterTextSplitter 기본 분리자 (langchain 기본값과 동일)
+# langchain RecursiveCharacterTextSplitter 기본값과 동일한 분리자 순서
 _DEFAULT_SEPARATORS = ["\n\n", "\n", ". ", " ", ""]
 
 
@@ -68,40 +70,40 @@ def _make_chunk_id(doc_name: str, page_number: int, chunk_index: int) -> str:
 
 
 class _RecursiveTextSplitter:
-    """RecursiveCharacterTextSplitter 직접 구현.
+    """RecursiveCharacterTextSplitter 직접 구현 (Python 3.10 / pydantic 독립).
 
-    langchain 의존성 없이 동일한 재귀 분리 알고리즘을 구현한다.
-    separators 순서대로 시도하며, 조각이 chunk_size를 초과하면
-    다음 separator로 재귀 분리한다.
+    separators 순서대로 분리를 시도하고, 조각이 chunk_size를 초과하면
+    다음 separator로 재귀 분리한다. 분리된 조각들은 chunk_overlap을 유지하며
+    chunk_size 이하로 병합된다.
+
+    langchain의 _split_text / _merge_splits 동작과 동일하다.
     """
 
-    def __init__(
-        self,
-        chunk_size: int,
-        chunk_overlap: int,
-        separators: list,
-    ) -> None:
+    def __init__(self, chunk_size: int, chunk_overlap: int, separators: list) -> None:
         self._chunk_size = chunk_size
         self._chunk_overlap = chunk_overlap
         self._separators = separators
 
     def split_text(self, text: str) -> list:
-        """텍스트를 재귀적으로 분리하여 청크 리스트를 반환한다."""
+        """텍스트를 청킹하여 문자열 리스트를 반환한다."""
         return self._split(text, self._separators)
 
+    # ── 내부 구현 ──────────────────────────────────────────────────────────
+
     def _split(self, text: str, separators: list) -> list:
-        """현재 separator로 분리 후, 큰 조각은 다음 separator로 재귀 처리."""
+        """현재 separator로 분리 후 큰 조각은 다음 separator로 재귀 분리."""
         if not text.strip():
             return []
 
         sep = separators[0]
         remaining = separators[1:]
 
-        # 현재 separator로 분리
+        # separator로 분리 (빈 separator = 문자 단위)
         raw_parts = text.split(sep) if sep else list(text)
-        parts = [p for p in raw_parts if p.strip()]
+        # 빈 문자열 제거 (분리자가 연속될 때 발생)
+        parts = [p for p in raw_parts if p]
 
-        # chunk_size 초과 조각은 다음 separator로 재귀 분리
+        # chunk_size 초과 조각 → 다음 separator로 재귀 분리
         good_parts = []
         for part in parts:
             if len(part) <= self._chunk_size or not remaining:
@@ -109,35 +111,49 @@ class _RecursiveTextSplitter:
             else:
                 good_parts.extend(self._split(part, remaining))
 
-        # 조각들을 chunk_size 기준으로 병합
         return self._merge(good_parts, sep if sep else "")
 
     def _merge(self, parts: list, separator: str) -> list:
-        """조각들을 chunk_size/chunk_overlap 기준으로 병합한다."""
+        """조각들을 chunk_size / chunk_overlap 기준으로 병합한다.
+
+        langchain _merge_splits 동작과 동일:
+        - 조각을 순서대로 누적
+        - 누적 크기가 chunk_size를 초과하면 현재 청크를 저장
+        - 저장 후 앞에서부터 조각을 제거하여 overlap 크기(≤ chunk_overlap)만 유지
+        """
+        sep_len = len(separator)
         chunks = []
-        current: list = []
-        current_len = 0
+        current: list = []  # 현재 누적 중인 조각들
+
+        def _current_len() -> int:
+            """current 조각들을 separator로 이었을 때의 총 길이."""
+            if not current:
+                return 0
+            return sum(len(p) for p in current) + sep_len * (len(current) - 1)
 
         for part in parts:
             part_len = len(part)
-            sep_len = len(separator) if current else 0
-            join_len = current_len + sep_len + part_len
+            join_len = _current_len() + (sep_len if current else 0) + part_len
 
             if join_len > self._chunk_size and current:
+                # 현재 청크 저장
                 chunk_text = separator.join(current).strip()
                 if chunk_text:
                     chunks.append(chunk_text)
 
-                # overlap: 뒤에서부터 chunk_overlap 크기만큼 유지
-                while current:
-                    dropped = current.pop(0)
-                    current_len -= len(dropped) + len(separator)
-                    if current_len <= self._chunk_overlap:
-                        break
+                # overlap 확보: 앞에서부터 조각을 제거하되
+                # current_len <= chunk_overlap 이 되면 멈춤
+                # (langchain과 동일한 while 조건)
+                while current and (
+                    _current_len() > self._chunk_overlap
+                    or (_current_len() + (sep_len if current else 0) + part_len > self._chunk_size
+                        and _current_len() > 0)
+                ):
+                    current.pop(0)
 
             current.append(part)
-            current_len = sum(len(p) for p in current) + len(separator) * max(0, len(current) - 1)
 
+        # 마지막 잔여 조각 저장
         if current:
             chunk_text = separator.join(current).strip()
             if chunk_text:
@@ -149,7 +165,7 @@ class _RecursiveTextSplitter:
 class DocumentChunker:
     """문서 청커.
 
-    chunking_config.yaml의 파라미터로 텍스트 분리기를 초기화하고,
+    chunking_config.yaml 파라미터로 텍스트 분리기를 초기화하고,
     파싱된 문서를 청킹한 뒤 Delta Table에 Upsert한다.
     """
 
@@ -176,11 +192,7 @@ class DocumentChunker:
 
         for page in doc.pages:
             if not page.text.strip():
-                logger.debug(
-                    "빈 페이지 건너뜀: %s 페이지 %d",
-                    doc.doc_name,
-                    page.page_number,
-                )
+                logger.debug("빈 페이지 건너뜀: %s 페이지 %d", doc.doc_name, page.page_number)
                 continue
 
             texts = self._splitter.split_text(page.text)
@@ -216,7 +228,7 @@ class DocumentChunker:
             chunks = self.chunk_document(doc)
             all_chunks.extend(chunks)
 
-        doc_stats = {}
+        doc_stats: dict = {}
         for c in all_chunks:
             doc_stats[c.doc_name] = doc_stats.get(c.doc_name, 0) + 1
 
@@ -241,11 +253,9 @@ class DocumentChunker:
 
         _spark: SparkSession = spark  # type: ignore[assignment]
 
-        # Delta Table 생성 (없으면)
         _spark.sql(_CREATE_TABLE_SQL.format(table_name=table_name))
         logger.info("Delta Table 준비 완료: %s", table_name)
 
-        # Chunk → Row 변환
         rows = [
             (
                 c.chunk_id,
@@ -270,7 +280,6 @@ class DocumentChunker:
         temp_view = "_chunks_temp"
         df.createOrReplaceTempView(temp_view)
 
-        # Upsert (chunk_id 기준)
         _spark.sql(_MERGE_SQL.format(table_name=table_name, temp_view=temp_view))
 
         saved_count = _spark.sql(f"SELECT COUNT(*) FROM {table_name}").collect()[0][0]
