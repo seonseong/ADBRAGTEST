@@ -8,7 +8,7 @@ Databricks 노트북(PySpark 환경)에서 import하여 사용한다.
 
 import hashlib
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
@@ -89,7 +89,7 @@ class DocumentChunker:
         페이지 텍스트가 비어 있으면 해당 페이지는 건너뜀.
         """
         chunks: list[Chunk] = []
-        created_at = datetime.now(tz=UTC)
+        created_at = datetime.now(tz=timezone.utc)
 
         for page in doc.pages:
             if not page.text.strip():
