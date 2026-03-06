@@ -16,9 +16,9 @@
 
 # COMMAND ----------
 
-# EasyOCR 설치 (한국어 OCR용)
-# 첫 실행 시 ~300MB 모델 다운로드 소요
-%pip install easyocr
+# 노트북 세션 의존성 설치
+# 클러스터 라이브러리와 별개로 노트북 환경에 명시적으로 설치
+%pip install pymupdf langchain-text-splitters easyocr
 
 # COMMAND ----------
 # MAGIC %md ## 셀 2: 프로젝트 패키지 경로 설정
