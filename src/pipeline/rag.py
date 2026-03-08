@@ -4,10 +4,9 @@ Vector Search 검색 + LLM 생성을 조합하는 파이프라인.
 Databricks 노트북 및 Gradio UI에서 import하여 사용한다.
 
 Note:
-    Databricks 환경 제약:
-    - pydantic 비사용 → dataclass 기반
-    - mlflow.deployments로 LLM 엔드포인트 호출 (자격 증명 자동 처리)
-    - type hint에서 list[X] 형식 사용 (Python 3.10+ 호환)
+    databricks-vectorsearch 패키지는 namespace 충돌 문제로 사용하지 않는다.
+    databricks-sdk의 w.vector_search_indexes.query_index() API를 사용한다.
+    mlflow.deployments로 LLM 엔드포인트를 호출한다 (자격 증명 자동 처리).
 """
 
 from dataclasses import dataclass, field
@@ -22,7 +21,7 @@ from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Vector Search similarity_search 반환 컬럼 순서
+# similarity_search 요청 컬럼 순서 (score는 응답에 자동 추가됨)
 _SEARCH_COLUMNS = ["chunk_id", "doc_name", "doc_type", "page_number", "text"]
 
 
@@ -45,8 +44,8 @@ class RAGResponse:
     question: str
     answer: str
     chunks: list = field(default_factory=list)  # list[RetrievedChunk]
-    retrieved_count: int = 0   # threshold 통과 후 최종 사용 수
-    raw_count: int = 0         # Vector Search 원결과 수
+    retrieved_count: int = 0
+    raw_count: int = 0
 
 
 def _build_context(chunks: list) -> str:
@@ -65,8 +64,8 @@ def _build_context(chunks: list) -> str:
 class RAGPipeline:
     """Retrieval-Augmented Generation 파이프라인.
 
-    Vector Search로 관련 청크를 검색하고,
-    Databricks 서빙 엔드포인트(Claude Sonnet)으로 답변을 생성한다.
+    databricks-sdk로 Vector Search 검색을 수행하고,
+    mlflow.deployments로 Claude Sonnet 답변을 생성한다.
 
     Args:
         vs_endpoint_name: Databricks Vector Search Endpoint 이름.
@@ -89,7 +88,7 @@ class RAGPipeline:
         self._templates = load_prompt_templates()
 
         # lazy 초기화 — import 시 네트워크 호출 방지
-        self._index: Any = None
+        self._ws_client: Any = None
         self._deploy_client: Any = None
 
         logger.info(
@@ -100,20 +99,16 @@ class RAGPipeline:
             self._retrieval_cfg.similarity_threshold,
         )
 
-    # ── 내부 lazy 초기화 ────────────────────────────────────────────────────
+    # ── lazy 초기화 ─────────────────────────────────────────────────────────
 
-    def _get_index(self) -> Any:
-        """Vector Search Index 인스턴스를 lazy 반환."""
-        if self._index is None:
-            from databricks.vector_search.client import VectorSearchClient  # noqa: PLC0415
+    def _get_ws_client(self) -> Any:
+        """WorkspaceClient를 lazy 반환 (databricks-sdk)."""
+        if self._ws_client is None:
+            from databricks.sdk import WorkspaceClient  # noqa: PLC0415
 
-            vsc = VectorSearchClient()
-            self._index = vsc.get_index(
-                endpoint_name=self._vs_endpoint_name,
-                index_name=self._vs_index_name,
-            )
-            logger.debug("VS Index 연결 완료: %s", self._vs_index_name)
-        return self._index
+            self._ws_client = WorkspaceClient()
+            logger.debug("WorkspaceClient 초기화 완료")
+        return self._ws_client
 
     def _get_deploy_client(self) -> Any:
         """MLflow deployments 클라이언트를 lazy 반환."""
@@ -134,32 +129,33 @@ class RAGPipeline:
             top_k: 검색 결과 수. None이면 retrieval_config.yaml 값 사용.
 
         Returns:
-            similarity_threshold 이상인 RetrievedChunk 리스트 (score 내림차순).
+            similarity_threshold 이상인 RetrievedChunk 리스트.
         """
         k = top_k if top_k is not None else self._retrieval_cfg.top_k
         threshold = self._retrieval_cfg.similarity_threshold
 
         logger.info("검색 시작: query='%.50s', top_k=%d, threshold=%.2f", question, k, threshold)
 
-        index = self._get_index()
-        raw_result = index.similarity_search(
+        w = self._get_ws_client()
+        response = w.vector_search_indexes.query_index(
+            index_name=self._vs_index_name,
             query_text=question,
             columns=_SEARCH_COLUMNS,
             num_results=k,
         )
 
-        rows = raw_result.get("result", {}).get("data_array", [])
+        rows = response.result.data_array or []
         logger.debug("VS 원결과: %d건", len(rows))
 
         chunks = []
         for row in rows:
             # data_array 컬럼 순서: chunk_id, doc_name, doc_type, page_number, text, score
             chunk = RetrievedChunk(
-                chunk_id=row[0] if len(row) > 0 else "",
-                doc_name=row[1] if len(row) > 1 else "",
-                doc_type=row[2] if len(row) > 2 else "",
+                chunk_id=str(row[0]) if len(row) > 0 else "",
+                doc_name=str(row[1]) if len(row) > 1 else "",
+                doc_type=str(row[2]) if len(row) > 2 else "",
                 page_number=int(row[3]) if len(row) > 3 else 0,
-                text=row[4] if len(row) > 4 else "",
+                text=str(row[4]) if len(row) > 4 else "",
                 score=float(row[5]) if len(row) > 5 else 0.0,
             )
             if chunk.score >= threshold:
@@ -167,9 +163,7 @@ class RAGPipeline:
 
         logger.info(
             "검색 완료: 원결과 %d건 → threshold(%.2f) 필터 후 %d건",
-            len(rows),
-            threshold,
-            len(chunks),
+            len(rows), threshold, len(chunks),
         )
         return chunks
 
@@ -191,9 +185,7 @@ class RAGPipeline:
 
         logger.info(
             "생성 시작: llm=%s, chunks=%d개, context=%d자",
-            self._llm_endpoint_name,
-            len(chunks),
-            len(context),
+            self._llm_endpoint_name, len(chunks), len(context),
         )
 
         client = self._get_deploy_client()
@@ -225,10 +217,9 @@ class RAGPipeline:
         logger.info("RAG 실행: question='%.80s'", question)
 
         chunks = self.retrieve(question)
-        raw_count = len(chunks)
 
         if not chunks:
-            logger.warning("검색 결과 없음 (threshold 초과): question='%.80s'", question)
+            logger.warning("검색 결과 없음: question='%.80s'", question)
             return RAGResponse(
                 question=question,
                 answer="제공된 문서에서 해당 정보를 찾을 수 없습니다.",
@@ -244,5 +235,5 @@ class RAGPipeline:
             answer=answer,
             chunks=chunks,
             retrieved_count=len(chunks),
-            raw_count=raw_count,
+            raw_count=len(chunks),
         )

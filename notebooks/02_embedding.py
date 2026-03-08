@@ -25,9 +25,10 @@
 
 # COMMAND ----------
 
-# databricks-sdk와 함께 설치해야 namespace 충돌 방지
-# (클러스터 라이브러리의 databricks-sdk와 충돌 시 vector_search 서브모듈을 찾지 못함)
-%pip install "databricks-vectorsearch>=0.8.0,<0.9" "databricks-sdk>=0.40.0,<0.41"
+# databricks-sdk는 클러스터 라이브러리로 이미 설치됨 → %pip install 불필요
+# databricks-vectorsearch 패키지는 namespace 충돌 문제로 사용하지 않음
+# 대신 databricks-sdk의 w.vector_search_endpoints / w.vector_search_indexes API 사용
+print("databricks-sdk (클러스터 라이브러리) 사용 — 추가 설치 불필요")
 
 # COMMAND ----------
 # MAGIC %md ## 셀 2: PROJECT_ROOT 설정
@@ -41,8 +42,6 @@ from pathlib import Path
 # 노트북 경로로 프로젝트 루트 자동 감지
 try:
     _nb_path = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()
-    # 예: /Repos/email/ADBRAGTEST/notebooks/02_embedding
-    #  → /Workspace/Repos/email/ADBRAGTEST
     PROJECT_ROOT = "/Workspace" + "/".join(_nb_path.split("/")[:-2])
 except Exception:
     PROJECT_ROOT = "/Workspace/Repos/shseo@in4ucloud.com/ADBRAGTEST"
@@ -68,18 +67,10 @@ logger = get_logger("02_embedding")
 CHUNKS_TABLE = "shtest.ragtest.chunks"
 
 # ── Vector Search ──────────────────────────────────────────────
-# Endpoint 이름: Workspace 단위 공유 리소스 (이미 있으면 재사용)
-ENDPOINT_NAME = "shrag-vs-endpoint"
-
-# Index 이름: catalog.schema.index_name 형식
-INDEX_NAME = "shtest.ragtest.chunks_index"
-
-# 임베딩 모델: Databricks Managed Embedding (Foundation Model API)
+ENDPOINT_NAME          = "shrag-vs-endpoint"
+INDEX_NAME             = "shtest.ragtest.chunks_index"
 EMBEDDING_MODEL_ENDPOINT = "embedding-bge-m3"
-
-# 파이프라인 타입: TRIGGERED(수동 sync) vs CONTINUOUS(CDF 실시간)
-# 문서 수 14건 → TRIGGERED 충분
-PIPELINE_TYPE = "TRIGGERED"
+PIPELINE_TYPE          = "TRIGGERED"
 
 print(f"Chunks Table  : {CHUNKS_TABLE}")
 print(f"VS Endpoint   : {ENDPOINT_NAME}")
@@ -129,35 +120,44 @@ logger.info("사전 확인 완료: 총 %d개 청크, CDF=%s", total, cdf_enabled
 # COMMAND ----------
 
 import time
-from databricks.vector_search.client import VectorSearchClient
+from databricks.sdk import WorkspaceClient
+from databricks.sdk.service import vectorsearch as vs_svc
 
-vsc = VectorSearchClient()
+w = WorkspaceClient()
+
+def _ep_state(ep) -> str:
+    """Endpoint 상태를 문자열로 반환."""
+    state = ep.endpoint_status.state
+    return state.value if hasattr(state, "value") else str(state)
 
 # Endpoint 이미 존재하면 재사용
 try:
-    ep = vsc.get_endpoint(ENDPOINT_NAME)
-    ep_state = ep.get("endpoint_status", {}).get("state", "UNKNOWN")
-    print(f"기존 엔드포인트 발견: {ENDPOINT_NAME} (상태: {ep_state})")
-    logger.info("기존 VS Endpoint 사용: %s (state=%s)", ENDPOINT_NAME, ep_state)
+    ep = w.vector_search_endpoints.get_endpoint(endpoint_name=ENDPOINT_NAME)
+    state = _ep_state(ep)
+    print(f"기존 엔드포인트 발견: {ENDPOINT_NAME} (상태: {state})")
+    logger.info("기존 VS Endpoint 사용: %s (state=%s)", ENDPOINT_NAME, state)
+
 except Exception:
     print(f"엔드포인트 생성 중: {ENDPOINT_NAME} ...")
     logger.info("VS Endpoint 생성 시작: %s", ENDPOINT_NAME)
-    vsc.create_endpoint(name=ENDPOINT_NAME, endpoint_type="STANDARD")
 
-    # ONLINE 상태가 될 때까지 대기 (최대 15분)
-    max_wait_ep = 900
-    poll_ep = 30
-    elapsed_ep = 0
+    w.vector_search_endpoints.create_endpoint(
+        name=ENDPOINT_NAME,
+        endpoint_type=vs_svc.EndpointType.STANDARD,
+    )
+
+    # ONLINE 상태까지 대기 (최대 15분)
+    max_wait_ep, poll_ep, elapsed_ep = 900, 30, 0
     while elapsed_ep < max_wait_ep:
         time.sleep(poll_ep)
         elapsed_ep += poll_ep
-        ep = vsc.get_endpoint(ENDPOINT_NAME)
-        ep_state = ep.get("endpoint_status", {}).get("state", "UNKNOWN")
-        print(f"  [{elapsed_ep:4d}s] Endpoint 상태: {ep_state}")
-        if ep_state == "ONLINE":
+        ep = w.vector_search_endpoints.get_endpoint(endpoint_name=ENDPOINT_NAME)
+        state = _ep_state(ep)
+        print(f"  [{elapsed_ep:4d}s] Endpoint 상태: {state}")
+        if "ONLINE" in state:
             break
-        if ep_state in ("FAILED", "OFFLINE"):
-            raise RuntimeError(f"Endpoint 생성 실패: {ep}")
+        if "FAIL" in state or "OFFLINE" in state:
+            raise RuntimeError(f"Endpoint 생성 실패: {state}")
     else:
         raise TimeoutError(f"Endpoint 생성 타임아웃 ({max_wait_ep}s)")
 
@@ -169,28 +169,42 @@ except Exception:
 
 # COMMAND ----------
 
+def _idx_state(idx_obj) -> str:
+    """Index 상태를 문자열로 반환."""
+    status = idx_obj.status
+    if status is None:
+        return "UNKNOWN"
+    state = getattr(status, "detailed_state", None) or getattr(status, "state", "UNKNOWN")
+    return state.value if hasattr(state, "value") else str(state)
+
 # Index 이미 존재하면 재사용
 try:
-    idx = vsc.get_index(endpoint_name=ENDPOINT_NAME, index_name=INDEX_NAME)
-    desc = idx.describe()
-    idx_state = desc.get("status", {}).get("detailed_state", "UNKNOWN")
-    print(f"기존 인덱스 발견: {INDEX_NAME} (상태: {idx_state})")
-    logger.info("기존 VS Index 사용: %s (state=%s)", INDEX_NAME, idx_state)
+    idx_obj = w.vector_search_indexes.get_index(index_name=INDEX_NAME)
+    state = _idx_state(idx_obj)
+    print(f"기존 인덱스 발견: {INDEX_NAME} (상태: {state})")
+    logger.info("기존 VS Index 사용: %s (state=%s)", INDEX_NAME, state)
 
 except Exception:
     print(f"인덱스 생성 중: {INDEX_NAME} ...")
     logger.info("VS Index 생성 시작: %s", INDEX_NAME)
 
-    idx = vsc.create_delta_sync_index(
+    w.vector_search_indexes.create_index(
+        name=INDEX_NAME,
         endpoint_name=ENDPOINT_NAME,
-        source_table_name=CHUNKS_TABLE,
-        index_name=INDEX_NAME,
-        pipeline_type=PIPELINE_TYPE,
         primary_key="chunk_id",
-        embedding_source_column="text",
-        embedding_model_endpoint_name=EMBEDDING_MODEL_ENDPOINT,
+        index_type=vs_svc.VectorIndexType.DELTA_SYNC,
+        delta_sync_index_spec=vs_svc.DeltaSyncVectorIndexSpecRequest(
+            source_table=CHUNKS_TABLE,
+            pipeline_type=vs_svc.PipelineType.TRIGGERED,
+            embedding_source_columns=[
+                vs_svc.EmbeddingSourceColumn(
+                    name="text",
+                    embedding_model_endpoint_name=EMBEDDING_MODEL_ENDPOINT,
+                )
+            ],
+        ),
     )
-    print(f"인덱스 생성 요청 완료. 백그라운드 빌드 시작.")
+    print("인덱스 생성 요청 완료. 백그라운드 빌드 시작.")
     logger.info("VS Index 생성 요청 완료: %s", INDEX_NAME)
 
 # COMMAND ----------
@@ -198,44 +212,48 @@ except Exception:
 
 # COMMAND ----------
 
-# TRIGGERED 파이프라인은 sync()로 명시적 동기화 호출
+# TRIGGERED 파이프라인 — 명시적 sync 호출
 print("동기화 트리거 중...")
-idx.sync()
+w.vector_search_indexes.sync_index(index_name=INDEX_NAME)
 logger.info("동기화 트리거 완료")
 print("동기화 트리거 완료. 상태 모니터링 시작...\n")
 
-# 완료까지 대기 (최대 20분: 임베딩 생성 포함)
-_MAX_WAIT = 1200
+_MAX_WAIT      = 1200
 _POLL_INTERVAL = 30
-_elapsed = 0
-_READY_STATES = {"ONLINE", "ONLINE_NO_PENDING_UPDATE"}
-_FAIL_STATES = {"FAILED", "OFFLINE"}
+_elapsed       = 0
+_READY         = {"ONLINE", "ONLINE_NO_PENDING_UPDATE"}
+_FAIL          = {"FAILED", "OFFLINE"}
 
 while _elapsed < _MAX_WAIT:
     time.sleep(_POLL_INTERVAL)
     _elapsed += _POLL_INTERVAL
 
-    desc = idx.describe()
-    status = desc.get("status", {})
-    state = status.get("detailed_state", status.get("state", "UNKNOWN"))
-    indexed = status.get("indexed_row_count", "?")
-    total_src = status.get("total_row_count", "?")
+    idx_obj = w.vector_search_indexes.get_index(index_name=INDEX_NAME)
+    state   = _idx_state(idx_obj)
+
+    # indexed_row_count는 SDK 객체 속성 또는 as_dict()로 접근
+    try:
+        idx_dict   = idx_obj.as_dict()
+        status_d   = idx_dict.get("status", {})
+        indexed    = status_d.get("indexed_row_count", "?")
+        total_src  = status_d.get("total_row_count", "?")
+    except Exception:
+        indexed = total_src = "?"
 
     print(f"[{_elapsed:5d}s] 상태: {state:<35} 인덱싱: {indexed}/{total_src}")
     logger.debug("VS Index 상태: state=%s, indexed=%s/%s", state, indexed, total_src)
 
-    if state in _READY_STATES:
-        print(f"\n✓ 인덱스 온라인 완료! 인덱싱된 청크: {indexed:,}개")
+    if state in _READY or any(r in state for r in _READY):
+        print(f"\n인덱스 온라인 완료! 인덱싱된 청크: {indexed}개")
         logger.info("VS Index 온라인: %s, 청크 %s개", INDEX_NAME, indexed)
         break
 
-    if state in _FAIL_STATES:
-        logger.error("VS Index 빌드 실패: %s", status)
-        raise RuntimeError(f"인덱스 빌드 실패 — 상태: {status}")
+    if state in _FAIL or any(f in state for f in _FAIL):
+        logger.error("VS Index 빌드 실패: state=%s", state)
+        raise RuntimeError(f"인덱스 빌드 실패 — 상태: {state}")
 
 else:
-    print(f"\n⚠ 타임아웃 ({_MAX_WAIT}s). 인덱싱이 백그라운드에서 계속 진행 중일 수 있습니다.")
-    print("Databricks UI → Vector Search에서 상태를 직접 확인하세요.")
+    print(f"\n타임아웃 ({_MAX_WAIT}s). Databricks UI → Vector Search에서 상태 확인하세요.")
     logger.warning("VS Index 동기화 타임아웃: elapsed=%ds", _elapsed)
 
 # COMMAND ----------
@@ -243,7 +261,6 @@ else:
 
 # COMMAND ----------
 
-# SOP/QMS 도메인 테스트 쿼리
 _TEST_QUERIES = [
     "GMP 준수 절차",
     "원료 수입 기준 및 시험 방법",
@@ -258,23 +275,23 @@ print("=" * 70)
 for query in _TEST_QUERIES:
     print(f"\n▶ 쿼리: '{query}'")
     try:
-        results = idx.similarity_search(
+        resp = w.vector_search_indexes.query_index(
+            index_name=INDEX_NAME,
             query_text=query,
             columns=["chunk_id", "doc_name", "doc_type", "text"],
             num_results=3,
         )
-        hits = results.get("result", {}).get("data_array", [])
+        hits = resp.result.data_array or []
 
         if not hits:
             print("  결과 없음")
             continue
 
         for rank, row in enumerate(hits, 1):
-            # columns 순서: chunk_id, doc_name, doc_type, text, score
-            doc_name = row[1] if len(row) > 1 else "?"
-            doc_type = row[2] if len(row) > 2 else "?"
-            text_preview = (row[3][:120] + "...") if len(row) > 3 else "?"
-            score = row[4] if len(row) > 4 else "?"
+            doc_name     = row[1] if len(row) > 1 else "?"
+            doc_type     = row[2] if len(row) > 2 else "?"
+            text_preview = (str(row[3])[:120] + "...") if len(row) > 3 else "?"
+            score        = row[4] if len(row) > 4 else "?"
             print(f"  [{rank}] [{doc_type}] {doc_name}")
             print(f"      점수: {score:.4f}" if isinstance(score, float) else f"      점수: {score}")
             print(f"      {text_preview}")
