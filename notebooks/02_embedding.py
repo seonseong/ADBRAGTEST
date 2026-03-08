@@ -242,11 +242,25 @@ while _ep_elapsed < _EP_MAX_WAIT:
 else:
     raise TimeoutError(f"Endpoint 대기 타임아웃 ({_EP_MAX_WAIT}s)")
 
-# 2단계: TRIGGERED 파이프라인 — 명시적 sync 호출
-print("동기화 트리거 중...")
-w.vector_search_indexes.sync_index(index_name=INDEX_NAME)
-logger.info("동기화 트리거 완료")
-print("동기화 트리거 완료. 상태 모니터링 시작...\n")
+# 2단계: Index 준비 대기 후 sync 트리거 (최대 10분 재시도)
+print("동기화 트리거 중... (인덱스 초기화 완료까지 대기)")
+_SYNC_MAX_WAIT = 600
+_sync_elapsed  = 0
+while _sync_elapsed < _SYNC_MAX_WAIT:
+    try:
+        w.vector_search_indexes.sync_index(index_name=INDEX_NAME)
+        logger.info("동기화 트리거 완료")
+        print(f"동기화 트리거 완료 ({_sync_elapsed}s 경과). 상태 모니터링 시작...\n")
+        break
+    except Exception as _sync_err:
+        if "not ready" in str(_sync_err).lower():
+            print(f"  [{_sync_elapsed:4d}s] 인덱스 초기화 중 대기...")
+            time.sleep(30)
+            _sync_elapsed += 30
+        else:
+            raise
+else:
+    raise TimeoutError(f"sync_index 트리거 타임아웃 ({_SYNC_MAX_WAIT}s): 인덱스가 준비되지 않음")
 
 _MAX_WAIT      = 1200
 _POLL_INTERVAL = 30
