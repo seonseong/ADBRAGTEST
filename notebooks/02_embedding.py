@@ -25,9 +25,9 @@
 
 # COMMAND ----------
 
-# Vector Search SDK — Databricks Runtime에 미포함 시 설치
-# (클러스터 라이브러리로 설치된 경우 생략 가능하나, 노트북 세션 보장을 위해 유지)
-%pip install "databricks-vectorsearch>=0.8.0,<0.9"
+# databricks-sdk와 함께 설치해야 namespace 충돌 방지
+# (클러스터 라이브러리의 databricks-sdk와 충돌 시 vector_search 서브모듈을 찾지 못함)
+%pip install "databricks-vectorsearch>=0.8.0,<0.9" "databricks-sdk>=0.40.0,<0.41"
 
 # COMMAND ----------
 # MAGIC %md ## 셀 2: PROJECT_ROOT 설정
