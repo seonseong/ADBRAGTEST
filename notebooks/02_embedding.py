@@ -229,43 +229,39 @@ except Exception as _get_err:
 # (TRIGGERED 모드에서 sync_index()는 이후 데이터 추가 시에만 사용)
 print("인덱스 빌드 중... (create_index 시 자동 시작된 초기 sync 완료 대기)\n")
 
-_MAX_WAIT      = 1200
+# 실제 응답 구조: status.ready(bool) + status.indexed_row_count
+# state 필드가 없으므로 ready 플래그로 완료 판단
+_MAX_WAIT      = 2400  # 최대 40분 (임베딩 생성 포함)
 _POLL_INTERVAL = 30
 _elapsed       = 0
-_READY         = {"ONLINE", "ONLINE_NO_PENDING_UPDATE"}
-_FAIL          = {"FAILED", "OFFLINE"}
 
 while _elapsed < _MAX_WAIT:
     time.sleep(_POLL_INTERVAL)
     _elapsed += _POLL_INTERVAL
 
-    idx_obj = w.vector_search_indexes.get_index(index_name=INDEX_NAME)
-    state   = _idx_state(idx_obj)
+    idx_obj  = w.vector_search_indexes.get_index(index_name=INDEX_NAME)
+    idx_dict = idx_obj.as_dict()
+    status_d = idx_dict.get("status", {})
 
-    # indexed_row_count는 SDK 객체 속성 또는 as_dict()로 접근
-    try:
-        idx_dict   = idx_obj.as_dict()
-        status_d   = idx_dict.get("status", {})
-        indexed    = status_d.get("indexed_row_count", "?")
-        total_src  = status_d.get("total_row_count", "?")
-    except Exception:
-        indexed = total_src = "?"
+    is_ready = status_d.get("ready", False)
+    indexed  = status_d.get("indexed_row_count", 0)
+    message  = status_d.get("message", "")[:100]
 
-    print(f"[{_elapsed:5d}s] 상태: {state:<35} 인덱싱: {indexed}/{total_src}")
-    logger.debug("VS Index 상태: state=%s, indexed=%s/%s", state, indexed, total_src)
+    print(f"[{_elapsed:5d}s] ready={is_ready}, indexed={indexed:,}개, msg={message}")
+    logger.debug("VS Index 상태: ready=%s, indexed=%s", is_ready, indexed)
 
-    if state in _READY or any(r in state for r in _READY):
-        print(f"\n인덱스 온라인 완료! 인덱싱된 청크: {indexed}개")
-        logger.info("VS Index 온라인: %s, 청크 %s개", INDEX_NAME, indexed)
+    if is_ready and indexed > 0:
+        print(f"\n인덱스 준비 완료! 인덱싱된 청크: {indexed:,}개")
+        logger.info("VS Index 준비 완료: %s, 청크 %d개", INDEX_NAME, indexed)
         break
 
-    if state in _FAIL or any(f in state for f in _FAIL):
-        logger.error("VS Index 빌드 실패: state=%s", state)
-        raise RuntimeError(f"인덱스 빌드 실패 — 상태: {state}")
+    if "fail" in message.lower() or "error" in message.lower():
+        logger.error("VS Index 빌드 실패: %s", message)
+        raise RuntimeError(f"인덱스 빌드 실패: {message}")
 
 else:
-    print(f"\n타임아웃 ({_MAX_WAIT}s). Databricks UI → Vector Search에서 상태 확인하세요.")
-    logger.warning("VS Index 동기화 타임아웃: elapsed=%ds", _elapsed)
+    print(f"\n타임아웃 ({_MAX_WAIT}s). Databricks UI → Vector Search에서 상태를 확인하세요.")
+    logger.warning("VS Index 대기 타임아웃: elapsed=%ds", _elapsed)
 
 # COMMAND ----------
 # MAGIC %md ## 셀 8: 검색 테스트
