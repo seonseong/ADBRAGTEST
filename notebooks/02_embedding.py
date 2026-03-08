@@ -177,17 +177,8 @@ def _idx_state(idx_obj) -> str:
     state = getattr(status, "detailed_state", None) or getattr(status, "state", "UNKNOWN")
     return state.value if hasattr(state, "value") else str(state)
 
-# Index 이미 존재하면 재사용
-try:
-    idx_obj = w.vector_search_indexes.get_index(index_name=INDEX_NAME)
-    state = _idx_state(idx_obj)
-    print(f"기존 인덱스 발견: {INDEX_NAME} (상태: {state})")
-    logger.info("기존 VS Index 사용: %s (state=%s)", INDEX_NAME, state)
-
-except Exception:
-    print(f"인덱스 생성 중: {INDEX_NAME} ...")
-    logger.info("VS Index 생성 시작: %s", INDEX_NAME)
-
+# Index 정상 존재 여부 확인 → 깨진 상태(UC에만 잔존)면 삭제 후 재생성
+def _create_vs_index() -> None:
     w.vector_search_indexes.create_index(
         name=INDEX_NAME,
         endpoint_name=ENDPOINT_NAME,
@@ -204,6 +195,27 @@ except Exception:
             ],
         ),
     )
+
+try:
+    idx_obj = w.vector_search_indexes.get_index(index_name=INDEX_NAME)
+    state = _idx_state(idx_obj)
+    print(f"기존 인덱스 발견: {INDEX_NAME} (상태: {state})")
+    logger.info("기존 VS Index 사용: %s (state=%s)", INDEX_NAME, state)
+
+except Exception as _get_err:
+    # get_index 실패 = 인덱스 없음 OR UC에만 잔존하는 깨진 상태
+    # → 기존 엔트리 삭제 시도 후 재생성
+    logger.warning("get_index 실패 (%s) → 삭제 후 재생성 시도", _get_err)
+    try:
+        w.vector_search_indexes.delete_index(index_name=INDEX_NAME)
+        print(f"기존 잔존 인덱스 삭제 완료: {INDEX_NAME}")
+        time.sleep(5)  # 삭제 반영 대기
+    except Exception as _del_err:
+        print(f"삭제 시도 결과 (없으면 무시): {_del_err}")
+
+    print(f"인덱스 생성 중: {INDEX_NAME} ...")
+    logger.info("VS Index 생성 시작: %s", INDEX_NAME)
+    _create_vs_index()
     print("인덱스 생성 요청 완료. 백그라운드 빌드 시작.")
     logger.info("VS Index 생성 요청 완료: %s", INDEX_NAME)
 
