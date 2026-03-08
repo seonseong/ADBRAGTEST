@@ -224,43 +224,10 @@ except Exception as _get_err:
 
 # COMMAND ----------
 
-# 1단계: Endpoint ONLINE 대기 (sync 전 필수)
-print("Endpoint 준비 대기 중...")
-_EP_MAX_WAIT = 900
-_ep_elapsed  = 0
-while _ep_elapsed < _EP_MAX_WAIT:
-    _ep      = w.vector_search_endpoints.get_endpoint(endpoint_name=ENDPOINT_NAME)
-    _ep_str  = _ep_state(_ep)
-    print(f"  [{_ep_elapsed:4d}s] Endpoint 상태: {_ep_str}")
-    if "ONLINE" in _ep_str:
-        print("Endpoint ONLINE 확인\n")
-        break
-    if "FAIL" in _ep_str or "OFFLINE" in _ep_str:
-        raise RuntimeError(f"Endpoint 비정상 상태: {_ep_str}")
-    time.sleep(30)
-    _ep_elapsed += 30
-else:
-    raise TimeoutError(f"Endpoint 대기 타임아웃 ({_EP_MAX_WAIT}s)")
-
-# 2단계: Index 준비 대기 후 sync 트리거 (최대 10분 재시도)
-print("동기화 트리거 중... (인덱스 초기화 완료까지 대기)")
-_SYNC_MAX_WAIT = 600
-_sync_elapsed  = 0
-while _sync_elapsed < _SYNC_MAX_WAIT:
-    try:
-        w.vector_search_indexes.sync_index(index_name=INDEX_NAME)
-        logger.info("동기화 트리거 완료")
-        print(f"동기화 트리거 완료 ({_sync_elapsed}s 경과). 상태 모니터링 시작...\n")
-        break
-    except Exception as _sync_err:
-        if "not ready" in str(_sync_err).lower():
-            print(f"  [{_sync_elapsed:4d}s] 인덱스 초기화 중 대기...")
-            time.sleep(30)
-            _sync_elapsed += 30
-        else:
-            raise
-else:
-    raise TimeoutError(f"sync_index 트리거 타임아웃 ({_SYNC_MAX_WAIT}s): 인덱스가 준비되지 않음")
+# create_index 호출 시 초기 sync가 자동 시작됨
+# → sync_index() 별도 호출 불필요, ONLINE 상태까지 폴링만 진행
+# (TRIGGERED 모드에서 sync_index()는 이후 데이터 추가 시에만 사용)
+print("인덱스 빌드 중... (create_index 시 자동 시작된 초기 sync 완료 대기)\n")
 
 _MAX_WAIT      = 1200
 _POLL_INTERVAL = 30
