@@ -224,7 +224,25 @@ except Exception as _get_err:
 
 # COMMAND ----------
 
-# TRIGGERED 파이프라인 — 명시적 sync 호출
+# 1단계: Endpoint ONLINE 대기 (sync 전 필수)
+print("Endpoint 준비 대기 중...")
+_EP_MAX_WAIT = 900
+_ep_elapsed  = 0
+while _ep_elapsed < _EP_MAX_WAIT:
+    _ep      = w.vector_search_endpoints.get_endpoint(endpoint_name=ENDPOINT_NAME)
+    _ep_str  = _ep_state(_ep)
+    print(f"  [{_ep_elapsed:4d}s] Endpoint 상태: {_ep_str}")
+    if "ONLINE" in _ep_str:
+        print("Endpoint ONLINE 확인\n")
+        break
+    if "FAIL" in _ep_str or "OFFLINE" in _ep_str:
+        raise RuntimeError(f"Endpoint 비정상 상태: {_ep_str}")
+    time.sleep(30)
+    _ep_elapsed += 30
+else:
+    raise TimeoutError(f"Endpoint 대기 타임아웃 ({_EP_MAX_WAIT}s)")
+
+# 2단계: TRIGGERED 파이프라인 — 명시적 sync 호출
 print("동기화 트리거 중...")
 w.vector_search_indexes.sync_index(index_name=INDEX_NAME)
 logger.info("동기화 트리거 완료")
