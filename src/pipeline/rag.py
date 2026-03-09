@@ -141,8 +141,10 @@ class RAGPipeline:
 
         w = self._get_ws_client()
 
-        _max_retries = 3
-        _retry_delay = 5  # 초
+        # VS 엔드포인트 콜드 스타트 워밍업 대응: 지수 백오프 재시도
+        # 콜드 스타트 시 30~60초 소요 → 총 대기 시간 최대 75초(10+20+40+5s)
+        _max_retries = 4
+        _retry_delays = [10, 20, 40]  # 시도 1→2: 10s, 2→3: 20s, 3→4: 40s
         last_exc: Exception | None = None
 
         for attempt in range(1, _max_retries + 1):
@@ -157,11 +159,12 @@ class RAGPipeline:
             except Exception as exc:
                 last_exc = exc
                 if attempt < _max_retries:
+                    delay = _retry_delays[attempt - 1]
                     logger.warning(
-                        "VS 쿼리 실패 (시도 %d/%d): %s — %d초 후 재시도",
-                        attempt, _max_retries, exc, _retry_delay,
+                        "VS 쿼리 실패 (시도 %d/%d, 콜드스타트 워밍업 중): %s — %d초 후 재시도",
+                        attempt, _max_retries, exc, delay,
                     )
-                    time.sleep(_retry_delay)
+                    time.sleep(delay)
         else:
             raise RuntimeError(f"VS 쿼리 {_max_retries}회 실패: {last_exc}") from last_exc
 
