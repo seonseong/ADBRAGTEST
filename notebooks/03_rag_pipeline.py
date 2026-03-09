@@ -88,29 +88,24 @@ from databricks.sdk import WorkspaceClient
 w = WorkspaceClient()
 idx_obj = w.vector_search_indexes.get_index(index_name=VS_INDEX_NAME)
 
-status = idx_obj.status
-if status is None:
-    raise RuntimeError("인덱스 상태를 읽을 수 없습니다.")
+# 실제 API 응답 구조: status.ready(bool) + status.indexed_row_count
+idx_dict     = idx_obj.as_dict()
+status_d     = idx_dict.get("status", {})
+is_ready     = status_d.get("ready", False)
+indexed_rows = status_d.get("indexed_row_count", 0)
+message      = status_d.get("message", "")
 
-raw_state = getattr(status, "detailed_state", None) or getattr(status, "state", "UNKNOWN")
-state = raw_state.value if hasattr(raw_state, "value") else str(raw_state)
+print(f"인덱스 ready  : {is_ready}")
+print(f"인덱싱된 청크 : {indexed_rows:,}개")
+print(f"메시지        : {message[:80]}")
 
-try:
-    idx_dict    = idx_obj.as_dict()
-    indexed_rows = idx_dict.get("status", {}).get("indexed_row_count", "?")
-except Exception:
-    indexed_rows = "?"
-
-print(f"인덱스 상태  : {state}")
-print(f"인덱싱된 청크: {indexed_rows}개")
-
-if "ONLINE" not in state:
+if not is_ready or indexed_rows == 0:
     raise RuntimeError(
-        f"인덱스가 ONLINE 상태가 아닙니다: {state}\n"
+        f"인덱스가 준비되지 않았습니다: ready={is_ready}, indexed={indexed_rows}\n"
         "02_embedding.py 셀 7 완료 후 다시 실행하세요."
     )
 
-logger.info("VS Index 확인: state=%s, indexed=%s", state, indexed_rows)
+logger.info("VS Index 확인: ready=%s, indexed=%d", is_ready, indexed_rows)
 print("\nVector Search 인덱스 정상 확인 완료")
 
 # COMMAND ----------
