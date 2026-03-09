@@ -9,6 +9,7 @@ Note:
     mlflow.deployments로 LLM 엔드포인트를 호출한다 (자격 증명 자동 처리).
 """
 
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -124,6 +125,8 @@ class RAGPipeline:
     def retrieve(self, question: str, top_k: int | None = None) -> list:
         """Vector Search로 관련 청크를 검색한다.
 
+        콜드 스타트(VS 엔드포인트 워밍업) 대응을 위해 최대 3회 재시도한다.
+
         Args:
             question: 검색 쿼리 문자열.
             top_k: 검색 결과 수. None이면 retrieval_config.yaml 값 사용.
@@ -137,12 +140,30 @@ class RAGPipeline:
         logger.info("검색 시작: query='%.50s', top_k=%d, threshold=%.2f", question, k, threshold)
 
         w = self._get_ws_client()
-        response = w.vector_search_indexes.query_index(
-            index_name=self._vs_index_name,
-            query_text=question,
-            columns=_SEARCH_COLUMNS,
-            num_results=k,
-        )
+
+        _max_retries = 3
+        _retry_delay = 5  # 초
+        last_exc: Exception | None = None
+
+        for attempt in range(1, _max_retries + 1):
+            try:
+                response = w.vector_search_indexes.query_index(
+                    index_name=self._vs_index_name,
+                    query_text=question,
+                    columns=_SEARCH_COLUMNS,
+                    num_results=k,
+                )
+                break
+            except Exception as exc:
+                last_exc = exc
+                if attempt < _max_retries:
+                    logger.warning(
+                        "VS 쿼리 실패 (시도 %d/%d): %s — %d초 후 재시도",
+                        attempt, _max_retries, exc, _retry_delay,
+                    )
+                    time.sleep(_retry_delay)
+        else:
+            raise RuntimeError(f"VS 쿼리 {_max_retries}회 실패: {last_exc}") from last_exc
 
         rows = response.result.data_array or []
         logger.debug("VS 원결과: %d건", len(rows))
