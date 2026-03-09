@@ -4,7 +4,7 @@
 top_k: 5
 
 # 유사도 하한값 (0.0~1.0). 이 값 미만의 결과는 제외
-similarity_threshold: 0.7
+similarity_threshold: 0.3
 
 # Re-ranking 활성화 여부 (Task 008에서 구현 후 true로 전환 가능)
 enable_reranker: false
