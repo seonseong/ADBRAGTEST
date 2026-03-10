@@ -88,9 +88,10 @@ def _parse_llm_endpoint_name(raw: str) -> str:
 
 def _load_pipeline_config() -> tuple[str, str, str]:
     """환경변수에서 RAGPipeline 생성 인자를 로드한다."""
-    vs_endpoint = os.getenv(_ENV_VS_ENDPOINT, _DEFAULT_VS_ENDPOINT)
-    vs_index = os.getenv(_ENV_VS_INDEX, _DEFAULT_VS_INDEX)
-    llm_raw = os.getenv(_ENV_LLM_ENDPOINT, _DEFAULT_LLM_ENDPOINT)
+    # 빈 문자열("")도 설정 누락으로 간주하여 기본값 사용
+    vs_endpoint = os.getenv(_ENV_VS_ENDPOINT) or _DEFAULT_VS_ENDPOINT
+    vs_index = os.getenv(_ENV_VS_INDEX) or _DEFAULT_VS_INDEX
+    llm_raw = os.getenv(_ENV_LLM_ENDPOINT) or _DEFAULT_LLM_ENDPOINT
     llm_endpoint = _parse_llm_endpoint_name(llm_raw)
 
     logger.info(
@@ -265,7 +266,6 @@ def build_ui() -> gr.Blocks:
     """
     with gr.Blocks(
         title=_APP_TITLE,
-        theme=gr.themes.Soft(),
         fill_height=True,
     ) as demo:
         gr.Markdown(f"## {_APP_TITLE}")
@@ -278,8 +278,7 @@ def build_ui() -> gr.Blocks:
                     label="대화",
                     type="messages",
                     height=520,
-                    show_copy_button=True,
-                    bubble_full_width=False,
+                    allow_tags=False,
                 )
                 with gr.Row():
                     msg_input = gr.Textbox(
